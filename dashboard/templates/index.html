@@ -2,46 +2,413 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Predictive Machine Vibration Monitoring</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Predictive Machine Vibration Monitoring | Edge & Server Diagnostic Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-    h1 { font-size: 1.4rem; }
-    #status-bar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
-    #verdict { text-align: center; padding: 1rem; border-radius: 8px; background: #f4f4f4; margin-bottom: 1rem; }
-    #prediction { margin: 0; font-size: 2rem; }
-    #probability { margin: 0.25rem 0 0; color: #555; }
-    canvas { margin-bottom: 1.5rem; }
-    table { border-collapse: collapse; width: 100%; }
-    td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
-    td:first-child { color: #555; }
-    button { padding: 0.4rem 0.8rem; cursor: pointer; }
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --accent-blue: #58a6ff;
+      --accent-green: #2ea043;
+      --accent-red: #f85149;
+      --accent-amber: #d29922;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      line-height: 1.5;
+      padding: 1.5rem 1rem;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 1.5rem;
+    }
+
+    .header-titles h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .header-titles p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .status-pills {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .pill {
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+
+    .dot.live { background: var(--accent-green); box-shadow: 0 0 8px var(--accent-green); }
+    .dot.stale { background: var(--accent-amber); box-shadow: 0 0 8px var(--accent-amber); }
+    .dot.disconnected { background: var(--accent-red); box-shadow: 0 0 8px var(--accent-red); }
+
+    /* Alert Banners */
+    .banner {
+      display: none;
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      margin-bottom: 1.25rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+
+    .banner.warning {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(210, 153, 34, 0.15);
+      border: 1px solid var(--accent-amber);
+      color: #e3b341;
+    }
+
+    .banner.danger {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(248, 81, 73, 0.15);
+      border: 1px solid var(--accent-red);
+      color: #ff7b72;
+    }
+
+    /* Verdict Card */
+    .verdict-hero {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      text-align: center;
+      margin-bottom: 1.5rem;
+      transition: all 0.3s ease;
+    }
+
+    .verdict-title {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.25rem;
+    }
+
+    .verdict-text {
+      font-size: 2.25rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      margin-bottom: 0.25rem;
+      color: var(--text-muted);
+    }
+
+    .verdict-text.normal { color: #3fb950; }
+    .verdict-text.faulty { color: var(--accent-red); }
+
+    .verdict-sub {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    /* Controls Grid */
+    .control-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+    }
+
+    .card-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 1rem;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: #21262d;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.45rem 0.9rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: var(--font-sans);
+    }
+
+    button:hover:not(:disabled) {
+      background: #30363d;
+      border-color: #8b949e;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    button.btn-primary {
+      background: #238636;
+      border-color: rgba(240, 246, 252, 0.1);
+    }
+    button.btn-primary:hover:not(:disabled) { background: #2ea043; }
+
+    button.btn-danger {
+      background: #da3633;
+      border-color: rgba(240, 246, 252, 0.1);
+    }
+    button.btn-danger:hover:not(:disabled) { background: #f85149; }
+
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-top: 0.75rem;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent-blue);
+    }
+
+    /* Charts Section */
+    .chart-container {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+
+    .chart-header h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+
+    .chart-legend {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    /* Telemetry Table */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .metric-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      text-align: left;
+    }
+
+    .metric-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+
+    .metric-value {
+      font-family: var(--font-mono);
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--accent-blue);
+    }
+
+    .metric-unit {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-weight: 400;
+      margin-left: 0.2rem;
+    }
+
+    footer {
+      text-align: center;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
   </style>
 </head>
 <body>
-  <h1>Predictive Machine Vibration Monitoring</h1>
+  <div class="container">
+    <header>
+      <div class="header-titles">
+        <h1>Predictive Machine Vibration Monitoring</h1>
+        <p>Embedded Uno R3 &bull; ADXL345 &bull; IR Tachometer &bull; Adaptive Calibration &bull; MLP Classifier</p>
+      </div>
+      <div class="status-pills">
+        <span class="pill" id="conn-pill"><span class="dot" id="conn-dot"></span><span id="conn-text">Connecting...</span></span>
+        <span class="pill" id="calib-pill"><span id="calib-status-text">Not Calibrated</span></span>
+        <span class="pill" id="rate-pill">800 Hz</span>
+      </div>
+    </header>
 
-  <div id="status-bar">
-    <span id="calibration-status">Not calibrated</span>
-    <button id="calibrate-start">Start Calibration</button>
-    <button id="calibrate-stop" disabled>Stop Calibration</button>
+    <div class="banner warning" id="stale-warning">
+      <span>&#9888; Warning: Data connection is stale (&gt;3s since last packet). Sensor or serial reader may be paused.</span>
+    </div>
+
+    <div class="banner danger" id="sensor-error">
+      <span id="error-message-text">&#10060; Hardware/Processing Error detected.</span>
+    </div>
+
+    <!-- Verdict Card -->
+    <div class="verdict-hero" id="verdict-card">
+      <div class="verdict-title">Machine Operational Status</div>
+      <div class="verdict-text" id="prediction">WAITING FOR DATA</div>
+      <div class="verdict-sub" id="confidence">Model Confidence: --</div>
+    </div>
+
+    <!-- Control Section -->
+    <div class="control-grid">
+      <!-- Motor Driver Control Card -->
+      <div class="card">
+        <div class="card-title">Motor Control (L298N Driver)</div>
+        <div class="btn-group">
+          <button id="btn-motor-start" class="btn-primary">Start Motor</button>
+          <button id="btn-motor-stop" class="btn-danger">Stop Motor</button>
+        </div>
+        <div class="slider-row">
+          <label for="motor-speed-slider" style="font-size: 0.8rem; color: var(--text-muted);">PWM Speed:</label>
+          <input type="range" id="motor-speed-slider" min="0" max="255" value="180">
+          <span id="motor-speed-val" style="font-family: var(--font-mono); font-size: 0.85rem;">180</span>
+        </div>
+      </div>
+
+      <!-- Baseline Calibration Card -->
+      <div class="card">
+        <div class="card-title">Adaptive Baseline Calibration</div>
+        <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+          Mount rig, ensure stable motor RPM in healthy state, then collect baseline.
+        </p>
+        <div class="btn-group">
+          <button id="calibrate-start" class="btn-primary">Start Calibration</button>
+          <button id="calibrate-stop" disabled>Finalize & Save Baseline</button>
+        </div>
+        <div id="calib-feedback" style="font-size: 0.75rem; color: var(--accent-blue); margin-top: 0.5rem; font-family: var(--font-mono);"></div>
+      </div>
+    </div>
+
+    <!-- Telemetry Cards -->
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Actual Shaft Speed</div>
+        <div class="metric-value"><span id="feat-rpm">--</span><span class="metric-unit">RPM</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Vibration RMS</div>
+        <div class="metric-value"><span id="feat-rms">--</span><span class="metric-unit">g</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Dominant Freq (1X)</div>
+        <div class="metric-value"><span id="feat-freq">--</span><span class="metric-unit">Hz</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Spectral Energy</div>
+        <div class="metric-value"><span id="feat-energy">--</span></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Kurtosis (Excess)</div>
+        <div class="metric-value"><span id="feat-kurt">--</span></div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="chart-container">
+      <div class="chart-header">
+        <h3>Live Time-Domain Vibration Waveform</h3>
+        <span class="chart-legend" id="waveform-legend">Latest Window (g vs Samples)</span>
+      </div>
+      <canvas id="waveform-chart" height="90"></canvas>
+    </div>
+
+    <div class="chart-container">
+      <div class="chart-header">
+        <h3>Frequency Spectrum (FFT Magnitude: 0 &ndash; 500 Hz)</h3>
+        <span class="chart-legend">Single-Sided Amplitude Spectrum</span>
+      </div>
+      <canvas id="fft-chart" height="90"></canvas>
+    </div>
+
+    <footer>
+      <span>Predictive Machine Vibration Monitoring System &bull; Embedded Systems Review 1 Implementation</span>
+    </footer>
   </div>
-
-  <div id="verdict">
-    <p id="prediction">--</p>
-    <p id="probability"></p>
-  </div>
-
-  <canvas id="waveform-chart" height="80"></canvas>
-  <canvas id="fft-chart" height="80"></canvas>
-
-  <table>
-    <tr><td>RMS</td><td id="feat-rms">--</td></tr>
-    <tr><td>Dominant frequency</td><td id="feat-freq">--</td></tr>
-    <tr><td>Spectral energy</td><td id="feat-energy">--</td></tr>
-    <tr><td>Kurtosis</td><td id="feat-kurt">--</td></tr>
-    <tr><td>RPM</td><td id="feat-rpm">--</td></tr>
-  </table>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
 </body>
