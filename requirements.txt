@@ -1,0 +1,11 @@
+numpy
+scipy
+scikit-learn
+joblib
+pandas
+matplotlib
+flask
+pyserial
+requests
+gunicorn
+jupyter

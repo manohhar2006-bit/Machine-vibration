@@ -1,0 +1,36 @@
+{
+  "n_deployments_total": 51,
+  "n_deployments_train": 38,
+  "n_deployments_test": 13,
+  "n_windows_train": 994,
+  "n_windows_test": 449,
+  "train_accuracy": 0.96579476861167,
+  "test_accuracy": 0.9576837416481069,
+  "test_classification_report": {
+    "normal": {
+      "precision": 0.8571428571428571,
+      "recall": 0.6818181818181818,
+      "f1-score": 0.759493670886076,
+      "support": 44.0
+    },
+    "imbalance": {
+      "precision": 0.966183574879227,
+      "recall": 0.9876543209876543,
+      "f1-score": 0.9768009768009768,
+      "support": 405.0
+    },
+    "accuracy": 0.9576837416481069,
+    "macro avg": {
+      "precision": 0.911663216011042,
+      "recall": 0.834736251402918,
+      "f1-score": 0.8681473238435264,
+      "support": 449.0
+    },
+    "weighted avg": {
+      "precision": 0.9554980702458189,
+      "recall": 0.9576837416481069,
+      "f1-score": 0.95550582878259,
+      "support": 449.0
+    }
+  }
+}

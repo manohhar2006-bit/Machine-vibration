@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Predictive Machine Vibration Monitoring</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; }
+    #status-bar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+    #verdict { text-align: center; padding: 1rem; border-radius: 8px; background: #f4f4f4; margin-bottom: 1rem; }
+    #prediction { margin: 0; font-size: 2rem; }
+    #probability { margin: 0.25rem 0 0; color: #555; }
+    canvas { margin-bottom: 1.5rem; }
+    table { border-collapse: collapse; width: 100%; }
+    td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
+    td:first-child { color: #555; }
+    button { padding: 0.4rem 0.8rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Predictive Machine Vibration Monitoring</h1>
+
+  <div id="status-bar">
+    <span id="calibration-status">Not calibrated</span>
+    <button id="calibrate-start">Start Calibration</button>
+    <button id="calibrate-stop" disabled>Stop Calibration</button>
+  </div>
+
+  <div id="verdict">
+    <p id="prediction">--</p>
+    <p id="probability"></p>
+  </div>
+
+  <canvas id="waveform-chart" height="80"></canvas>
+  <canvas id="fft-chart" height="80"></canvas>
+
+  <table>
+    <tr><td>RMS</td><td id="feat-rms">--</td></tr>
+    <tr><td>Dominant frequency</td><td id="feat-freq">--</td></tr>
+    <tr><td>Spectral energy</td><td id="feat-energy">--</td></tr>
+    <tr><td>Kurtosis</td><td id="feat-kurt">--</td></tr>
+    <tr><td>RPM</td><td id="feat-rpm">--</td></tr>
+  </table>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
