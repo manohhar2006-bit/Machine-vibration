@@ -1,355 +1,187 @@
 /*
- * Predictive Machine Vibration Monitoring Firmware
- * Target Microcontroller: Arduino Uno R3 (ATmega328P, 16 MHz, 2 KB SRAM)
- * 
- * Hardware Subsystems:
- *  1. Vibration Sensor: ADXL345 digital 3-axis accelerometer on I2C bus (A4=SDA, A5=SCL).
- *     - Output Data Rate (ODR): 800 Hz (BW_RATE = 0x0D, 400 Hz analog bandwidth).
- *     - Full resolution mode (+/-2g range, 3.9 mg/LSB scale factor).
- *     - I2C Fast Mode (400 kHz clock).
- * 
- *  2. Rotational Speed Sensor: IR slotted optical sensor on Pin 2 (INT0).
- *     - External interrupt with atomic pulse read.
- *     - Configurable pulses-per-revolution (PPR).
- * 
- *  3. Motor Driver: L298N H-Bridge Driver.
- *     - ENA: Pin 9 (Timer 1 PWM speed control).
- *     - IN1: Pin 8 (Direction control).
- *     - IN2: Pin 7 (Direction control).
- *     - Safety: Defaults strictly to STOPPED / DISABLED on boot or reset.
- * 
- * Memory Budget (2048 bytes SRAM total on ATmega328P):
- *  - accelBuffer: 256 samples * 2 bytes (int16_t) = 512 bytes (25.0% SRAM)
- *  - Wire I2C buffers: 5 * 32 bytes = 160 bytes
- *  - Serial TX/RX ring buffers: 64 + 64 = 128 bytes
- *  - Command line buffer & runtime variables: ~80 bytes
- *  - Total static allocation: ~880 bytes (~43% of SRAM)
- *  - Dynamic headroom for stack: > 1,150 bytes (> 56% free)
- * 
- * Communication Protocol:
- *  - Serial UART at 115200 baud.
- *  - Vibration Window Packet:
- *      $VIB,<seq>,<sample_rate>,<rpm>,<count>,<s0>,<s1>,...,<sN-1>\n
- *  - Diagnostic / Status Packets:
- *      $STATUS,SENSOR=<OK|ERR>,MOTOR=<STOPPED|RUNNING>,SPEED=<0-255>,RPM=<rpm>\n
- *      $OK,<message>\n
- *      $ERR,<message>\n
- *  - Supported Serial Commands (case-insensitive):
- *      MOTOR START [speed]   -- Start motor (optional speed 0-255, default 180)
- *      MOTOR STOP            -- Stop and disable motor driver
- *      MOTOR SPEED <0-255>   -- Set PWM duty cycle
- *      STATUS                -- Report subsystem status
+ * Vibration monitor firmware -- Arduino Uno.
+ *
+ * Drives the DC motor through the L298N, reads the ADXL345
+ * accelerometer over I2C and an IR slotted speed sensor via a hardware
+ * interrupt. Samples on a fixed micros()-timed interval, buffers
+ * WINDOW_SIZE samples, then transmits the mean-removed acceleration (g)
+ * plus the measured RPM as one CSV line over Serial:
+ *     <rpm>,<sample_1>,<sample_2>,...,<sample_N>
+ *
+ * Matches the packet format expected by serving/serial_reader.py
+ * (SAMPLE_RATE and WINDOW_SIZE there must match the values below).
+ *
+ * ADXL345 wiring (breadboard, bottom rails):
+ *   GND  -> bottom blue (GND) rail
+ *   VCC  -> bottom red rail, 3.3V
+ *   CS   -> bottom red rail, 3.3V (tied high selects I2C mode)
+ *   SDO  -> bottom blue (GND) rail (selects I2C address 0x53)
+ *   SDA  -> Arduino A4
+ *   SCL  -> Arduino A5
+ *   INT1, INT2 -> not connected
+ *
+ * IR speed sensor: signal -> D2 (external interrupt), power from the
+ * top 5V rail.
+ *
+ * L298N: ENA -> D10 (PWM speed), IN1 -> D8, IN2 -> D9. Motor supply on
+ * the L298N is a separate supply sharing a common ground with the Uno.
+ *
+ * Memory: the Uno has 2 KB of SRAM, so samples are stored as raw int16
+ * values (2 bytes each) and converted to g only when transmitted.
  */
-
 #include <Wire.h>
 
-// -----------------------------------------------------------------------------
-// Pin Configuration
-// -----------------------------------------------------------------------------
-const uint8_t PIN_IR_SENSOR  = 2;  // External interrupt 0 (INT0)
-const uint8_t PIN_MOTOR_IN2  = 7;  // L298N direction pin 2
-const uint8_t PIN_MOTOR_IN1  = 8;  // L298N direction pin 1
-const uint8_t PIN_MOTOR_ENA  = 9;  // L298N PWM speed enable (Timer 1)
+#define ADXL345_ADDR 0x53
+#define ADXL345_DEVID 0x00
+#define ADXL345_BW_RATE 0x2C
+#define ADXL345_POWER_CTL 0x2D
+#define ADXL345_DATA_FORMAT 0x31
+#define ADXL345_DATAX0 0x32
+#define ADXL345_DEVID_EXPECTED 0xE5
+#define ADXL345_ODR_1600HZ 0x0E  // output data rate, above the sampling rate
+#define ADXL345_MEASURE 0x08
+#define ADXL345_FULL_RES_2G 0x08  // full resolution, +-2g, 3.9 mg/LSB
 
-// -----------------------------------------------------------------------------
-// ADXL345 Registers & Settings
-// -----------------------------------------------------------------------------
-#define ADXL345_ADDR        0x53  // I2C address when ALT ADDRESS pin is GND
-#define ADXL345_DEVID_REG   0x00  // Device ID register (expects 0xE5)
-#define ADXL345_BW_RATE     0x2C  // Data rate and power mode control
-#define ADXL345_POWER_CTL   0x2D  // Power-saving features control
-#define ADXL345_DATA_FORMAT 0x31  // Data format control
-#define ADXL345_DATAX0      0x32  // X-axis data 0 (LSB)
+const byte IR_SENSOR_PIN = 2;  // must support external interrupts
+const byte MOTOR_ENA_PIN = 10;  // PWM capable
+const byte MOTOR_IN1_PIN = 8;
+const byte MOTOR_IN2_PIN = 9;
+const byte MOTOR_PWM_DUTY = 180;  // 0-255, motor speed
 
-// Sampling parameters
-const unsigned long SAMPLE_RATE_HZ     = 800;   // 800 Hz ODR matches ADXL345 BW_RATE 0x0D
-const unsigned long SAMPLE_INTERVAL_US = 1250;  // 1 / 800 Hz = 1250 microseconds
-const uint16_t      WINDOW_SIZE        = 256;   // 256 samples = 0.320 s window
+const unsigned long SAMPLE_INTERVAL_US = 1000;  // 1000 Hz
+const int WINDOW_SIZE = 512;
+const float PULSES_PER_REV = 1.0;  // slots on the speed disc
+const float G_PER_LSB = 0.0039;
 
-// Buffer allocation: stored as raw int16_t to strictly fit within ATmega328P SRAM
-int16_t  accelBuffer[WINDOW_SIZE];
-uint16_t bufferIndex = 0;
-uint16_t packetSequence = 0;
-
-// Hardware state
-bool sensorOnline = false;
-bool motorRunning = false;
-uint8_t motorPwmSpeed = 180;  // Default safe initial operating speed (~70% duty cycle)
-
-// -----------------------------------------------------------------------------
-// IR Optical Speed Sensor Configuration
-// -----------------------------------------------------------------------------
-// Standard optical encoder disc with 20 slots. Change to 1 if using single reflective tab.
-const unsigned int PULSES_PER_REV = 20;
+int16_t accelBuffer[WINDOW_SIZE];
+int bufferIndex = 0;
+long bufferSum = 0;
 
 volatile unsigned long pulseCount = 0;
-unsigned long lastRpmTimeMs = 0;
-float currentRpm = 0.0f;
+unsigned long lastRpmCalcMs = 0;
 
-// Interrupt Service Routine for IR Sensor
-void irSensorIsr() {
+void countPulse() {
   pulseCount++;
 }
 
-// -----------------------------------------------------------------------------
-// Serial Command Line Buffer
-// -----------------------------------------------------------------------------
-char cmdBuffer[32];
-uint8_t cmdIndex = 0;
-
-// -----------------------------------------------------------------------------
-// I2C Helper Functions
-// -----------------------------------------------------------------------------
-bool adxlWriteRegister(uint8_t reg, uint8_t value) {
+void adxlWriteRegister(byte reg, byte value) {
   Wire.beginTransmission(ADXL345_ADDR);
   Wire.write(reg);
   Wire.write(value);
-  return (Wire.endTransmission() == 0);
+  Wire.endTransmission();
 }
 
-uint8_t adxlReadRegister(uint8_t reg) {
+byte adxlReadRegister(byte reg) {
   Wire.beginTransmission(ADXL345_ADDR);
   Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return 0;
-  Wire.requestFrom((uint8_t)ADXL345_ADDR, (uint8_t)1);
-  return Wire.available() ? Wire.read() : 0;
+  Wire.endTransmission(false);
+  Wire.requestFrom(ADXL345_ADDR, 1);
+  return Wire.read();
 }
 
-int16_t adxlReadRawX() {
-  Wire.beginTransmission(ADXL345_ADDR);
-  Wire.write(ADXL345_DATAX0);
-  if (Wire.endTransmission(false) != 0) return 0;
+// Confirms the ADXL345 responds with its fixed device ID (0xE5) at 0x53.
+// On failure, halts and reports over Serial instead of streaming a
+// meaningless signal. The cause is almost always wiring.
+void checkAdxlPresent() {
+  byte devid = adxlReadRegister(ADXL345_DEVID);
 
-  Wire.requestFrom((uint8_t)ADXL345_ADDR, (uint8_t)2);
-  if (Wire.available() >= 2) {
-    uint8_t lsb = Wire.read();
-    uint8_t msb = Wire.read();
-    return (int16_t)((msb << 8) | lsb);
-  }
-  return 0;
-}
-
-// -----------------------------------------------------------------------------
-// Motor Driver Control Functions
-// -----------------------------------------------------------------------------
-void motorInit() {
-  pinMode(PIN_MOTOR_ENA, OUTPUT);
-  pinMode(PIN_MOTOR_IN1, OUTPUT);
-  pinMode(PIN_MOTOR_IN2, OUTPUT);
-
-  // Safety Requirement: Default strictly to STOPPED / DISABLED
-  analogWrite(PIN_MOTOR_ENA, 0);
-  digitalWrite(PIN_MOTOR_IN1, LOW);
-  digitalWrite(PIN_MOTOR_IN2, LOW);
-  motorRunning = false;
-}
-
-void motorStart(uint8_t speed) {
-  motorPwmSpeed = speed;
-  digitalWrite(PIN_MOTOR_IN1, HIGH);
-  digitalWrite(PIN_MOTOR_IN2, LOW);
-  analogWrite(PIN_MOTOR_ENA, motorPwmSpeed);
-  motorRunning = true;
-  Serial.print(F("$OK,MOTOR_STARTED,SPEED="));
-  Serial.println(motorPwmSpeed);
-}
-
-void motorStop() {
-  analogWrite(PIN_MOTOR_ENA, 0);
-  digitalWrite(PIN_MOTOR_IN1, LOW);
-  digitalWrite(PIN_MOTOR_IN2, LOW);
-  motorRunning = false;
-  Serial.println(F("$OK,MOTOR_STOPPED"));
-}
-
-void motorSetSpeed(uint8_t speed) {
-  motorPwmSpeed = speed;
-  if (motorRunning) {
-    analogWrite(PIN_MOTOR_ENA, motorPwmSpeed);
-  }
-  Serial.print(F("$OK,MOTOR_SPEED="));
-  Serial.println(motorPwmSpeed);
-}
-
-// -----------------------------------------------------------------------------
-// RPM Calculation (Atomic Pulse Read)
-// -----------------------------------------------------------------------------
-void updateRpm() {
-  unsigned long nowMs = millis();
-  unsigned long elapsedMs = nowMs - lastRpmTimeMs;
-
-  // Update RPM every 250 ms for smooth and responsive tracking
-  if (elapsedMs >= 250) {
-    noInterrupts();
-    unsigned long pulses = pulseCount;
-    pulseCount = 0;
-    interrupts();
-
-    float minutes = (float)elapsedMs / 60000.0f;
-    float revolutions = (float)pulses / (float)PULSES_PER_REV;
-    currentRpm = (minutes > 0.0f) ? (revolutions / minutes) : 0.0f;
-    lastRpmTimeMs = nowMs;
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Serial Command Processor
-// -----------------------------------------------------------------------------
-void processCommand(const char* cmd) {
-  // Trim leading whitespace
-  while (*cmd == ' ' || *cmd == '\t') cmd++;
-
-  if (strncmp(cmd, "MOTOR START", 11) == 0 || strncmp(cmd, "START", 5) == 0) {
-    const char* p = cmd + (strncmp(cmd, "MOTOR START", 11) == 0 ? 11 : 5);
-    while (*p == ' ') p++;
-    int spd = (*p != '\0') ? atoi(p) : motorPwmSpeed;
-    if (spd < 0) spd = 0;
-    if (spd > 255) spd = 255;
-    motorStart((uint8_t)spd);
-
-  } else if (strcmp(cmd, "MOTOR STOP") == 0 || strcmp(cmd, "STOP") == 0) {
-    motorStop();
-
-  } else if (strncmp(cmd, "MOTOR SPEED", 11) == 0 || strncmp(cmd, "SPEED", 5) == 0) {
-    const char* p = cmd + (strncmp(cmd, "MOTOR SPEED", 11) == 0 ? 11 : 5);
-    while (*p == ' ') p++;
-    int spd = atoi(p);
-    if (spd < 0) spd = 0;
-    if (spd > 255) spd = 255;
-    motorSetSpeed((uint8_t)spd);
-
-  } else if (strcmp(cmd, "STATUS") == 0) {
-    Serial.print(F("$STATUS,SENSOR="));
-    Serial.print(sensorOnline ? F("OK") : F("DISCONNECTED"));
-    Serial.print(F(",MOTOR="));
-    Serial.print(motorRunning ? F("RUNNING") : F("STOPPED"));
-    Serial.print(F(",SPEED="));
-    Serial.print(motorPwmSpeed);
-    Serial.print(F(",RPM="));
-    Serial.println(currentRpm, 1);
-
-  } else if (strlen(cmd) > 0) {
-    Serial.print(F("$ERR,UNKNOWN_COMMAND:"));
-    Serial.println(cmd);
-  }
-}
-
-void checkSerialInput() {
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
-    if (c == '\r' || c == '\n') {
-      if (cmdIndex > 0) {
-        cmdBuffer[cmdIndex] = '\0';
-        // Convert to uppercase for case-insensitive matching
-        for (uint8_t i = 0; i < cmdIndex; i++) {
-          if (cmdBuffer[i] >= 'a' && cmdBuffer[i] <= 'z') {
-            cmdBuffer[i] = cmdBuffer[i] - 'a' + 'A';
-          }
-        }
-        processCommand(cmdBuffer);
-        cmdIndex = 0;
-      }
-    } else if (cmdIndex < (sizeof(cmdBuffer) - 1)) {
-      cmdBuffer[cmdIndex++] = c;
+  if (devid != ADXL345_DEVID_EXPECTED) {
+    Serial.print(F("ADXL345 not found at 0x53 (DEVID read: 0x"));
+    Serial.print(devid, HEX);
+    Serial.println(F("). Check VCC/GND/CS/SDO wiring and SDA/SCL connections."));
+    while (true) {
     }
   }
+
+  Serial.println(F("ADXL345 found at 0x53."));
 }
 
-// -----------------------------------------------------------------------------
-// Transmit Vibration Window Packet
-// -----------------------------------------------------------------------------
-void transmitWindow() {
-  // Format: $VIB,<seq>,<sample_rate>,<rpm>,<count>,<val0>,<val1>,...
-  Serial.print(F("$VIB,"));
-  Serial.print(packetSequence++);
-  Serial.print(F(","));
-  Serial.print(SAMPLE_RATE_HZ);
-  Serial.print(F(","));
-  Serial.print(currentRpm, 1);
-  Serial.print(F(","));
-  Serial.print(WINDOW_SIZE);
+void startMotor() {
+  pinMode(MOTOR_ENA_PIN, OUTPUT);
+  pinMode(MOTOR_IN1_PIN, OUTPUT);
+  pinMode(MOTOR_IN2_PIN, OUTPUT);
+  digitalWrite(MOTOR_IN1_PIN, HIGH);
+  digitalWrite(MOTOR_IN2_PIN, LOW);
+  analogWrite(MOTOR_ENA_PIN, MOTOR_PWM_DUTY);
+}
 
-  // Transmit values scaled to acceleration in g (3.9 mg/LSB = 0.0039 g/LSB)
-  for (uint16_t i = 0; i < WINDOW_SIZE; i++) {
-    Serial.print(F(","));
-    float g_val = (float)accelBuffer[i] * 0.0039f;
-    Serial.print(g_val, 3);
+int16_t readRawX() {
+  static int16_t lastRaw = 0;
+
+  Wire.beginTransmission(ADXL345_ADDR);
+  Wire.write(ADXL345_DATAX0);
+  Wire.endTransmission(false);
+
+  if (Wire.requestFrom(ADXL345_ADDR, 2) < 2) {
+    return lastRaw;  // failed read, repeat the previous sample
+  }
+
+  lastRaw = Wire.read() | (Wire.read() << 8);
+  return lastRaw;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  Wire.setClock(400000);  // fast mode, needed to read every 1 ms reliably
+
+  checkAdxlPresent();
+
+  adxlWriteRegister(ADXL345_DATA_FORMAT, ADXL345_FULL_RES_2G);
+  adxlWriteRegister(ADXL345_BW_RATE, ADXL345_ODR_1600HZ);
+  adxlWriteRegister(ADXL345_POWER_CTL, ADXL345_MEASURE);
+
+  pinMode(IR_SENSOR_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(IR_SENSOR_PIN), countPulse, FALLING);
+
+  startMotor();
+
+  lastRpmCalcMs = millis();
+}
+
+void sendWindow() {
+  noInterrupts();
+  unsigned long pulses = pulseCount;
+  pulseCount = 0;
+  interrupts();
+
+  unsigned long nowMs = millis();
+  float elapsedS = (nowMs - lastRpmCalcMs) / 1000.0;
+  lastRpmCalcMs = nowMs;
+  float rpm = (pulses / PULSES_PER_REV / elapsedS) * 60.0;
+
+  // Removing the window mean strips the static gravity component so the
+  // RMS feature reflects vibration only.
+  float mean = (float)bufferSum / WINDOW_SIZE;
+
+  Serial.print(rpm, 2);
+  for (int i = 0; i < WINDOW_SIZE; i++) {
+    Serial.print(',');
+    Serial.print((accelBuffer[i] - mean) * G_PER_LSB, 4);
   }
   Serial.println();
 }
 
-// -----------------------------------------------------------------------------
-// Arduino Setup
-// -----------------------------------------------------------------------------
-void setup() {
-  Serial.begin(115200);
-  while (!Serial && millis() < 1000);  // Brief wait for native USB, if applicable
-
-  Serial.println(F("$BOOT,Predictive Machine Vibration Monitoring Uno R3 Initializing..."));
-
-  // 1. Initialize motor driver in safe disabled state
-  motorInit();
-
-  // 2. Initialize IR speed sensor
-  pinMode(PIN_IR_SENSOR, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PIN_IR_SENSOR), irSensorIsr, FALLING);
-  lastRpmTimeMs = millis();
-
-  // 3. Initialize I2C bus at 400 kHz Fast Mode
-  Wire.begin();
-  Wire.setClock(400000);
-
-  // 4. Check ADXL345 connection and device ID
-  uint8_t devId = adxlReadRegister(ADXL345_DEVID_REG);
-  if (devId == 0xE5) {
-    sensorOnline = true;
-
-    // Configure Data Rate: 800 Hz ODR (BW_RATE = 0x0D)
-    adxlWriteRegister(ADXL345_BW_RATE, 0x0D);
-
-    // Configure Data Format: Full resolution mode, +/-2g range (DATA_FORMAT = 0x08)
-    adxlWriteRegister(ADXL345_DATA_FORMAT, 0x08);
-
-    // Set measurement mode (POWER_CTL = 0x08)
-    adxlWriteRegister(ADXL345_POWER_CTL, 0x08);
-
-    Serial.println(F("$OK,ADXL345_INITIALIZED_800HZ"));
-  } else {
-    sensorOnline = false;
-    Serial.print(F("$ERR,ADXL345_NOT_FOUND,DEVID="));
-    Serial.println(devId, HEX);
-  }
-
-  Serial.println(F("$READY,Waiting for commands or sampling..."));
-}
-
-// -----------------------------------------------------------------------------
-// Arduino Main Loop
-// -----------------------------------------------------------------------------
 void loop() {
-  static unsigned long lastSampleUs = 0;
+  static unsigned long lastSampleUs = micros();
   unsigned long nowUs = micros();
 
-  // 1. Check for incoming motor control and status commands
-  checkSerialInput();
+  if (nowUs - lastSampleUs < SAMPLE_INTERVAL_US) {
+    return;
+  }
+  lastSampleUs += SAMPLE_INTERVAL_US;
 
-  // 2. Update RPM estimate from optical sensor interrupts
-  updateRpm();
+  int16_t raw = readRawX();
+  accelBuffer[bufferIndex] = raw;
+  bufferSum += raw;
+  bufferIndex++;
 
-  // 3. Fixed sample interval scheduling (rollover-safe unsigned subtraction)
-  if (nowUs - lastSampleUs >= SAMPLE_INTERVAL_US) {
-    lastSampleUs = nowUs;
-
-    if (sensorOnline) {
-      accelBuffer[bufferIndex++] = adxlReadRawX();
-    } else {
-      // Missing sensor fallback: do not fabricate vibrations
-      accelBuffer[bufferIndex++] = 0;
-    }
-
-    if (bufferIndex >= WINDOW_SIZE) {
-      transmitWindow();
-      bufferIndex = 0;
-    }
+  if (bufferIndex >= WINDOW_SIZE) {
+    sendWindow();
+    bufferIndex = 0;
+    bufferSum = 0;
+    // Transmission blocks sampling, so restart the sampling clock to
+    // avoid a burst of catch-up samples at the start of the next window.
+    lastSampleUs = micros();
   }
 }

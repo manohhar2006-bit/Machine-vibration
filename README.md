@@ -22,9 +22,8 @@ Real-time predictive vibration monitoring and fault detection for rotating machi
 ```
 Machine-Vibration-Monitoring/
 ├── firmware/
-│   ├── vibration_monitor.ino             # Arduino Uno R3 acquisition & motor control sketch
 │   └── vibration_monitor/
-│       └── vibration_monitor.ino         # Standard Arduino IDE layout copy
+│       └── vibration_monitor.ino         # Arduino Uno R3 acquisition & motor control sketch
 ├── src/
 │   ├── features.py                       # Validated RMS, FFT peak, spectral energy, kurtosis
 │   ├── calibration.py                    # Robust BaselineCalibrator with scale floors
